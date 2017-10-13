@@ -7,6 +7,8 @@ using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Windows.Forms;
 using System.Text;
+using GameBotConsole;
+using static GameBotConsole.Win32Structures;
 
 class InterceptKeys
 {
@@ -78,29 +80,6 @@ namespace GameBot
 {
     public class Blah
     {
-        public const int WH_JOURNALRECORD = 0;
-        public const int WH_JOURNALPLAYBACK = 1;
-
-        [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
-        public static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hInstance, int threadId);
-
-        [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
-        public static extern bool UnhookWindowsHookEx(int idHook);
-
-        [DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
-        public static extern int CallNextHookEx(int idHook, int nCode, IntPtr wParam, IntPtr lParam);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
-        public static extern int GetLastError();
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern IntPtr GetModuleHandle(string lpModuleName);
-
-        private const int HC_GETNEXT = 1;
-        private const int HC_SKIP = 2;
-        private const int HC_NOREMOVE = 3;
-        private const int HC_ACTION = 0;
-
         [StructLayout(LayoutKind.Sequential)]
         [DataContract]
         public class EventMsg
@@ -136,9 +115,8 @@ namespace GameBot
                 }
             }
         }
-
-        public delegate int HookProc(int nCode, IntPtr wParam, IntPtr lParam);
-        private static int journalHook;
+        
+        private static IntPtr journalHook;
         private HookProc JournalRecordProcedure;
         private HookProc JournalPlaybackProcedure;
         private static EventMsg currentValue;
@@ -148,34 +126,30 @@ namespace GameBot
         public static void Main2(string[] args)
         {
             Blah blah = new Blah();
-            blah.Run();
-        }
-
-        private static IntPtr SetHook(HookProc proc)
-        {
-            using (Process curProcess = Process.GetCurrentProcess())
-            using (ProcessModule curModule = curProcess.MainModule)
-            {
-                return SetWindowsHookEx(WH_JOURNALRECORD, proc,
-                    GetModuleHandle(curModule.ModuleName), 0);
-            }
+            blah.RunNotWorking();
         }
 
         public void Run()
         {
+            IntPtr hookID = User32.SetHook(KeyboardHookCallback, IDHook.WH_KEYBOARD_LL);
+            Application.Run();
+            User32.UnhookWindowsHookEx(hookID);
+        }
+
+        public void RunNotWorking()
+        {
             // Set up hook with function we defined
-            var res = GetLastError();
+            var res = Kernel32.GetLastError();
             IntPtr hinstance = Marshal.GetHINSTANCE(Assembly.GetExecutingAssembly().GetModules()[0]);
             JournalRecordProcedure = JournalRecordProc;
             //var temp = SetWindowsHookEx(WH_JOURNALRECORD, JournalRecordProcedure, hinstance, 0);
-            var temp = SetHook(JournalRecordProcedure);
-            journalHook = temp.ToInt32();
-            res = GetLastError();
+            var temp = User32.SetHook(JournalRecordProcedure, IDHook.WH_JOURNALRECORD);
+            res = Kernel32.GetLastError();
             Console.Out.WriteLine($"Res = {res}");
             Application.Run();
             System.Threading.Thread.Sleep(TimeSpan.FromSeconds(5));
             // Remove hook
-            UnhookWindowsHookEx(journalHook);
+            User32.UnhookWindowsHookEx(temp);
             /*
             Console.Out.WriteLine("Playback starts");
 
@@ -196,10 +170,24 @@ namespace GameBot
             */
         }
 
-        public static int JournalRecordProc(int nCode, IntPtr wParam, IntPtr lParam)
+        private const int WM_KEYDOWN = 0x0100;
+
+        private static IntPtr KeyboardHookCallback(
+            int nCode, IntPtr wParam, IntPtr lParam)
+        {
+
+            if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
+            {
+                int vkCode = Marshal.ReadInt32(lParam);
+                Console.WriteLine((Keys)vkCode);
+            }
+            return User32.CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+        }
+
+        public static IntPtr JournalRecordProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
             //throw new Exception("checking");
-            if (nCode < 0) return CallNextHookEx(journalHook, nCode, wParam, lParam);
+            if (nCode < 0) return User32.CallNextHookEx(journalHook, nCode, wParam, lParam);
 
             EventMsg msg = (EventMsg)Marshal.PtrToStructure(lParam, typeof(EventMsg));
 
@@ -209,14 +197,14 @@ namespace GameBot
                 sw.WriteLine(msg);
             }
 
-            return CallNextHookEx(journalHook, nCode, wParam, lParam);
+            return User32.CallNextHookEx(journalHook, nCode, wParam, lParam);
         }
-        public static int JournalPlaybackProc(int nCode, IntPtr wParam, IntPtr lParam)
+        public static IntPtr JournalPlaybackProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
             //throw new Exception("checking");
-            switch (nCode)
+            switch ((NCode)nCode)
             {
-                case HC_GETNEXT:
+                case NCode.HC_GETNEXT:
                     //currentValue is a class level variable I use
                     //which gets it's value from the HC_SKIP section.
                     //this way no matter how many times HC_GETNEXT is called
@@ -231,10 +219,10 @@ namespace GameBot
                     Marshal.StructureToPtr(msg, lParam, true);
 
                     lastTime = msg.time;
+                    
+                    return new IntPtr(delta > 0 ? delta : 0);
 
-                    return delta > 0 ? delta : 0;
-
-                case HC_SKIP:
+                case NCode.HC_SKIP:
 
                     string data = null;
                     try
@@ -250,8 +238,8 @@ namespace GameBot
                     if (data == null)
                     {
                         currentValue = null;
-                        UnhookWindowsHookEx(journalHook);
-                        return 0;
+                        User32.UnhookWindowsHookEx(journalHook);
+                        return IntPtr.Zero;
                     }
 
                     //get your message and put it in currentMessage
@@ -260,10 +248,10 @@ namespace GameBot
                     break;
 
                 default:
-                    return CallNextHookEx(journalHook, nCode, wParam, lParam);
+                    return User32.CallNextHookEx(journalHook, nCode, wParam, lParam);
             }
 
-            return 0;
+            return IntPtr.Zero;
         }
     }
 
